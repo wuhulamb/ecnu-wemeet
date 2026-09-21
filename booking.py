@@ -7,7 +7,7 @@
     python3 booking.py list --days 30
 
     # 预约会议(无密码):2026-09-23 14:00 时长60分钟;   --password 123456 设置密码
-    python3 booking.py book --topic "周会" --date 2026-09-23 --time 14:00 --duration 60
+    python3 booking.py book --topic "周会" --date 2026-09-23 --time 14:00 --duration 120
 
     # 删除会议(list 里查到的 id,多个用逗号分隔)
     python3 booking.py delete 65464,65473
@@ -88,13 +88,13 @@ def build_session(cookie: str):
 
 
 def book_meeting(
-    cookie: str, topic: str, date: str, time_slot: str, duration: int = 30, password: str = ""
+    cookie: str, topic: str, date: str, time_slot: str, duration: int = 120, password: str = ""
 ) -> dict:
     """
     预约会议
       date:      'YYYY-MM-DD'
       time_slot: 'HH:MM'
-      duration:  分钟(默认30)
+      duration:  分钟(默认120)
       password:  空字符串=无密码
     """
     session, ut = build_session(cookie)
@@ -196,7 +196,7 @@ def main():
     p_book.add_argument("--topic", required=True, help="会议主题")
     p_book.add_argument("--date", required=True, help="会议日期 YYYY-MM-DD")
     p_book.add_argument("--time", required=True, help="开始时间 HH:MM")
-    p_book.add_argument("--duration", type=int, default=30, help="时长(分钟,默认30)")
+    p_book.add_argument("--duration", type=int, default=120, help="时长(分钟,默认120)")
     p_book.add_argument("--password", default="", help="会议密码(不传=无密码)")
 
     p_del = sub.add_parser("delete", help="删除会议")
