@@ -31,6 +31,7 @@ import base64
 import json
 import os
 import re
+import socket
 import sys
 import time
 from urllib.parse import parse_qs, urlparse
@@ -39,6 +40,18 @@ import requests
 from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from dotenv import load_dotenv
+
+# vmr.ecnu.edu.cn 存在 AAAA(IPv6)记录;部分网络 IPv6 路由不通时,
+# socket.connect 会挂满超时才回退 IPv4(每个请求白白卡 30s,list 双请求即 ~60s)。
+# 统一强制 IPv4,避免 IPv6 黑洞。
+_orig_getaddrinfo = socket.getaddrinfo
+
+
+def _ipv4_only(host, port, family=0, *args, **kwargs):
+    return _orig_getaddrinfo(host, port, socket.AF_INET, *args, **kwargs)
+
+
+socket.getaddrinfo = _ipv4_only
 
 VMR_ORIGIN = "https://vmr.ecnu.edu.cn"
 OAUTH_AUTHORIZE = (
@@ -70,7 +83,7 @@ def aes_ecb_encrypt_b64(key_b64: str, plaintext: str) -> str:
     return base64.b64encode(enc.update(data) + enc.finalize()).decode()
 
 
-def parse_login_page(text: str):
+def parse_login_page(text: str) -> tuple[str, str] | None:
     """从登录页提取 croypto(AES 密钥) 与 flowkey(execution)"""
     croypto = re.search(r'<p id="login-croypto">([^<]+)</p>', text)
     flowkey = re.search(r'<p id="login-page-flowkey">([^<]+)</p>', text)

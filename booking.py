@@ -2,27 +2,27 @@
 """
 华东师大云视频会议系统(vmr.ecnu.edu.cn)预约工具
 
-用法(自动使用 .env 的 VMR_USERNAME / VMR_PASSWORD 登录,无需 cookie 文件):
-    # 查看我的会议(--days 指定天数,默认7;接口支持任意范围)
-    python3 booking.py list --days 30
+用法(自动使用 .env 的 VMR_USERNAME / VMR_PASSWORD 登录):
+    # 查看我的会议(--days 指定天数,默认7)
+    uv run python booking.py list --days 30
 
-    # 预约会议(无密码):2026-09-23 14:00 时长60分钟;   --password 123456 设置密码
-    python3 booking.py book --topic "周会" --date 2026-09-23 --time 14:00 --duration 120
+    # 预约会议(无密码):2026-09-23 14:00 时长60分钟;--password 123456 设置密码
+    uv run python booking.py book --topic "周会" --date 2026-09-23 --time 14:00 --duration 120
 
     # 删除会议(list 里查到的 id,多个用逗号分隔)
-    python3 booking.py delete 65464,65473
+    uv run python booking.py delete 65464,65473
 
 说明:
-    - 登录复用 login.login(),登录态只存内存,不写文件
-    - 会议默认提交后需管理员审批(页面提示"会议申请保存后将提交给管理员审批")
+    - 登录态缓存于本地 cookie.txt(已 gitignore),失效时自动用 .env 账号重登
+    - 预约提交后系统自动批准,book 命令直接打印新会议号
     - 不传 --password 则为无密码会议
-    - 依赖: pip install requests
 """
 
 import argparse
 import base64
 import json
 import os
+import re
 import sys
 import time
 import urllib.parse
@@ -31,12 +31,22 @@ from datetime import date, timedelta
 import requests
 from dotenv import load_dotenv
 
-from login import LoginError, login
+from login import VM_UA, LoginError, login
 
 load_dotenv()  # 读取 .env(VMR_USERNAME / VMR_PASSWORD)
 
 BASE_URL = "https://vmr.ecnu.edu.cn/api/v1"
 COOKIE_FILE = "cookie.txt"  # 登录态缓存文件(已 gitignore)
+
+
+class AuthExpired(Exception):
+    """服务端返回 401,登录态已失效"""
+
+
+def _check_auth(resp: requests.Response) -> None:
+    """token 失效时服务端返回 HTTP 401,抛 AuthExpired 交由上层重登"""
+    if resp.status_code == 401:
+        raise AuthExpired
 
 
 def extract_token_from_cookie(cookie: str) -> str:
@@ -48,12 +58,13 @@ def extract_token_from_cookie(cookie: str) -> str:
     return token
 
 
-def encrypt_token(token: str, ts: int | None = None) -> str:
+def encrypt_token(token: str) -> str:
     """
     与前端一致的 user_token 加密算法:
       r = reverse( base64( base64( reverse( quote(token) + "_" + ts ) ) + "_" + ts ) )
+      ts = 当前毫秒时间戳
     """
-    a = str(ts if ts is not None else int(time.time() * 1000))
+    a = str(int(time.time() * 1000))
     b = urllib.parse.quote(token, safe="") + "_" + a
     e = b[::-1]
     n = base64.b64encode(e.encode()).decode()
@@ -78,11 +89,7 @@ def build_session(cookie: str):
             "Accept": "application/json, text/plain, */*",
             "Origin": "https://vmr.ecnu.edu.cn",
             "Referer": "https://vmr.ecnu.edu.cn/new",
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
-            ),
+            "User-Agent": VM_UA,
         }
     )
     return session, ut
@@ -99,7 +106,6 @@ def book_meeting(
       password:  空字符串=无密码
     """
     session, ut = build_session(cookie)
-    end_date = date  # 单次会议日期即结束日期
 
     payload = {
         "duration": str(duration),
@@ -112,7 +118,7 @@ def book_meeting(
         "usage": "办公",
         "is_recurrent": "0",
         "recurrent_id": "0",
-        "end_meeting_date": end_date,
+        "end_meeting_date": date,
         "end_meeting_times": "2",
         "repeat_type": "2",
         "size": "100",
@@ -136,6 +142,7 @@ def book_meeting(
     }
 
     resp = session.post(f"{BASE_URL}/meeting/edit", data=payload, timeout=30)
+    _check_auth(resp)
     try:
         return resp.json()
     except ValueError:
@@ -151,7 +158,52 @@ def query_calendar(cookie: str, start: str | None = None, end: str | None = None
         "end": end,
     }
     resp = session.post(f"{BASE_URL}/user/calendar/my", data=payload, timeout=30)
+    _check_auth(resp)
     return resp.json()
+
+
+def parse_zoom_info(zoom_info: str | None) -> tuple[str, str]:
+    """
+    从列表接口返回的 zoom_info(如 '会议号:261610460<br>密码:738671')解析出 (会议号, 密码)。
+    无会议号/无密码时对应位置返回空串。
+    """
+    if not zoom_info:
+        return "", ""
+    zoom_info = zoom_info.replace("：", ":")  # 兼容全角冒号  # noqa: RUF001
+    m = re.search(r"会议号:\s*(\d+)", zoom_info)
+    p = re.search(r"密码:\s*(\d*)", zoom_info)
+    return (m.group(1) if m else ""), (p.group(1) if p else "")
+
+
+def list_meetings(cookie: str) -> dict[int, dict]:
+    """拉取我的全部会议(/meeting/list),返回 {会议id: 会议详情} 映射。
+    详情中含 start_time/topic/zoom_info 等字段(zoom_info 含会议号与密码)。"""
+    session, ut = build_session(cookie)
+    payload = {"user_token": ut}
+    resp = session.post(f"{BASE_URL}/meeting/list", data=payload, timeout=30)
+    _check_auth(resp)
+    obj = resp.json()
+    if not obj.get("success"):
+        return {}
+    items = (obj.get("data") or {}).get("data") or []
+    return {int(m["id"]): m for m in items if m.get("id") is not None}
+
+
+def find_new_meeting(cookie: str, before_ids: set[int], topic: str) -> dict | None:
+    """
+    book 后在会议列表中定位新预约的会议:
+      1. 差集:book 前记录的 id 集合中不存在的 id(最可靠)
+      2. 兜底:按主题匹配(列表接口会截断主题到 20 字符,故用 startswith)
+    返回会议详情,找不到返回 None。
+    """
+    after = list_meetings(cookie)
+    candidates = [m for mid, m in after.items() if mid not in before_ids]
+    if len(candidates) == 1:
+        return candidates[0]
+    for m in candidates + list(after.values()):
+        if m.get("topic", "").startswith(topic[:20]):
+            return m
+    return None
 
 
 def delete_meeting(cookie: str, meeting_id: str) -> dict:
@@ -162,6 +214,7 @@ def delete_meeting(cookie: str, meeting_id: str) -> dict:
         "id": str(meeting_id),
     }
     resp = session.post(f"{BASE_URL}/meeting/delete", data=payload, timeout=30)
+    _check_auth(resp)
     try:
         return resp.json()
     except ValueError:
@@ -183,34 +236,23 @@ def _save_cookie_file(cookie: str) -> None:
         f.write(cookie)
 
 
-def _cookie_valid(cookie: str) -> bool:
-    """轻量校验 cookie 是否仍有效(调一次只读接口,远快于重新登录)"""
-    today = time.strftime("%Y-%m-%d")
-    try:
-        data = query_calendar(cookie, today, today)
-        return bool(data.get("success"))
-    except (ValueError, requests.RequestException):
-        return False
-
-
-def login_with_env() -> str:
+def login_with_env(force: bool = False) -> str:
     """
     获取登录态 cookie:
-      1. 优先读当前目录 cookie 文件,有效则直接使用
-      2. 缺失/失效则用 .env 账号重新登录并写回文件
+      1. 默认优先读 cookie 文件(仅格式检查,不做服务端往返)
+      2. 缺失/格式损坏/force=True 时用 .env 账号重新登录并写回文件
+    服务端是否真的失效由接口 401 时自动重登兜底(见 call_with_auth)。
     """
-    cached = _load_cookie_file()
+    cached = "" if force else _load_cookie_file()
     if cached:
         try:
-            extract_token_from_cookie(cached)  # 格式检查
-            if _cookie_valid(cached):  # 服务端有效性检查
-                print(f"[✓] 使用本地 cookie({COOKIE_FILE})")
-                return cached
+            extract_token_from_cookie(cached)
         except ValueError:
-            pass
-        print("[*] 本地 cookie 失效,重新登录...")
-    else:
-        print("[*] 未找到本地 cookie,开始登录...")
+            cached = ""  # 格式损坏 → 重新登录
+    if cached:
+        print(f"[✓] 使用本地 cookie({COOKIE_FILE})")
+        return cached
+    print((force and "[*] cookie 已失效,重新登录...") or "[*] 未找到有效本地 cookie,开始登录...")
 
     username = os.environ.get("VMR_USERNAME", "")
     password = os.environ.get("VMR_PASSWORD", "")
@@ -223,6 +265,15 @@ def login_with_env() -> str:
     _save_cookie_file(cookie)
     print(f"[✓] 登录成功,已缓存到 {COOKIE_FILE}")
     return cookie
+
+
+def call_with_auth(cookie: str, fn) -> object:
+    """执行 fn(cookie);若接口返回 401(token 超过 1 小时有效期),自动重新登录后重试一次"""
+    try:
+        return fn(cookie)
+    except AuthExpired:
+        print("[*] 登录态已失效,自动重新登录后重试...")
+        return fn(login_with_env(force=True))
 
 
 def main():
@@ -253,24 +304,29 @@ def main():
     args = parser.parse_args()
 
     cookie = login_with_env()
-    try:
-        token = extract_token_from_cookie(cookie)
-        print(f"[✓] 已解析出 token: {token[:12]}...")
-    except ValueError as e:
-        print(f"[✗] cookie 解析失败: {e}")
-        sys.exit(1)
 
     if args.cmd == "list":
         start = args.date or time.strftime("%Y-%m-%d")
         d = date.fromisoformat(start)
         end = start if args.days <= 0 else (d + timedelta(days=args.days)).isoformat()
-        data = query_calendar(cookie, start, end)
-        print(json.dumps(data, ensure_ascii=False, indent=2))
+        data = call_with_auth(cookie, lambda c: query_calendar(c, start, end))
+        details = call_with_auth(
+            cookie, list_meetings
+        )  # 会议号/密码在 /meeting/list 的 zoom_info 中
         if data.get("success") and data.get("data"):
-            print(f"\n共 {len(data['data'])} 场会议:")
-            for m in data["data"]:
+            meetings = data["data"]
+            print(f"共 {len(meetings)} 场会议:")
+            for m in meetings:
                 mid = m.get("id")
-                print(f"  - {m.get('start')} ~ {m.get('end')}  {m.get('title')}  (id={mid})")
+                info = details.get(int(mid), {}) if mid is not None else {}
+                number, pwd = parse_zoom_info(info.get("zoom_info"))
+                extra = f"会议号:{number}" if number else "会议号:未生成"
+                if pwd:
+                    extra += f" 密码:{pwd}"
+                s, e, title = m.get("start"), m.get("end"), m.get("title")
+                print(f"  - {s} ~ {e}  {title}  (id={mid}, {extra})")
+        else:
+            print("查询失败:" + json.dumps(data, ensure_ascii=False))
         return
 
     if args.cmd == "delete":
@@ -278,7 +334,7 @@ def main():
         print(f"[*] 正在删除 {len(ids)} 个会议: {ids}")
         ok = 0
         for mid in ids:
-            result = delete_meeting(cookie, mid)
+            result = call_with_auth(cookie, lambda c, m=mid: delete_meeting(c, m))
             print(json.dumps(result, ensure_ascii=False, indent=2))
             if result.get("success"):
                 print(f"[✓] 会议 {mid} 已删除")
@@ -299,18 +355,38 @@ def main():
         f"[*] 正在预约: {topic} @ {args.date} {time_slot} 时长{args.duration}分钟"
         f" 密码={'无' if not args.password else args.password}"
     )
-    result = book_meeting(
+    before_ids = set(call_with_auth(cookie, list_meetings))  # book 前已有会议 id,用于定位新会议
+    result = call_with_auth(
         cookie,
-        topic,
-        args.date,
-        time_slot,
-        duration=args.duration,
-        password=args.password,
+        lambda c: book_meeting(
+            c,
+            topic,
+            args.date,
+            time_slot,
+            duration=args.duration,
+            password=args.password,
+        ),
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
     if result.get("success"):
-        print("\n[✓] 预约申请已提交(需管理员审批)。可用 list 确认。")
+        # 定位新会议并查询会议号(审批通过/自动批准时立即生成,最多等待 ~9 秒)
+        meeting = None
+        for _ in range(3):
+            meeting = call_with_auth(cookie, lambda c: find_new_meeting(c, before_ids, topic))
+            if meeting and parse_zoom_info(meeting.get("zoom_info"))[0]:
+                break
+            time.sleep(3)
+        if meeting:
+            number, pwd = parse_zoom_info(meeting.get("zoom_info"))
+            line = f"[✓] 新会议 id={meeting.get('id')}"
+            if number:
+                line += f", 会议号:{number}"
+                if pwd:
+                    line += f", 密码:{pwd}"
+                print(line)
+            else:
+                print(f"[*] 新会议 id={meeting.get('id')} 已提交,会议号待审批生成,可稍后 list 查询")
     else:
         print("\n[✗] 预约失败,请检查参数或cookie是否过期")
         sys.exit(1)
