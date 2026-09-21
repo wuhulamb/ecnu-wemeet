@@ -15,3 +15,4 @@ wheels/
 !.env.example
 user_info.txt
 *.cookie
+cookie.txt

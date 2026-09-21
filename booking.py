@@ -36,6 +36,7 @@ from login import LoginError, login
 load_dotenv()  # 读取 .env(VMR_USERNAME / VMR_PASSWORD)
 
 BASE_URL = "https://vmr.ecnu.edu.cn/api/v1"
+COOKIE_FILE = "cookie.txt"  # 登录态缓存文件(已 gitignore)
 
 
 def extract_token_from_cookie(cookie: str) -> str:
@@ -167,19 +168,61 @@ def delete_meeting(cookie: str, meeting_id: str) -> dict:
         return {"status": resp.status_code, "raw": resp.text[:1000]}
 
 
+def _load_cookie_file() -> str:
+    """读取本地 cookie 文件,不存在/为空返回空串"""
+    try:
+        with open(COOKIE_FILE, encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def _save_cookie_file(cookie: str) -> None:
+    """将登录态写入 cookie 文件"""
+    with open(COOKIE_FILE, "w", encoding="utf-8") as f:
+        f.write(cookie)
+
+
+def _cookie_valid(cookie: str) -> bool:
+    """轻量校验 cookie 是否仍有效(调一次只读接口,远快于重新登录)"""
+    today = time.strftime("%Y-%m-%d")
+    try:
+        data = query_calendar(cookie, today, today)
+        return bool(data.get("success"))
+    except (ValueError, requests.RequestException):
+        return False
+
+
 def login_with_env() -> str:
     """
-    用 .env 的 VMR_USERNAME / VMR_PASSWORD 完成登录,
-    返回 user_info cookie 值(登录态只存内存,不写文件)。
+    获取登录态 cookie:
+      1. 优先读当前目录 cookie 文件,有效则直接使用
+      2. 缺失/失效则用 .env 账号重新登录并写回文件
     """
+    cached = _load_cookie_file()
+    if cached:
+        try:
+            extract_token_from_cookie(cached)  # 格式检查
+            if _cookie_valid(cached):  # 服务端有效性检查
+                print(f"[✓] 使用本地 cookie({COOKIE_FILE})")
+                return cached
+        except ValueError:
+            pass
+        print("[*] 本地 cookie 失效,重新登录...")
+    else:
+        print("[*] 未找到本地 cookie,开始登录...")
+
     username = os.environ.get("VMR_USERNAME", "")
     password = os.environ.get("VMR_PASSWORD", "")
     if not username or not password:
         raise SystemExit("[错误] .env 缺少 VMR_USERNAME / VMR_PASSWORD(参考 .env.example)")
     try:
-        return login(username, password)
+        cookie = login(username, password)
     except LoginError as e:
         raise SystemExit(f"[✗] 自动登录失败: {e}") from e
+    _save_cookie_file(cookie)
+    print(f"[✓] 登录成功,已缓存到 {COOKIE_FILE}")
+    return cookie
 
 
 def main():
@@ -206,10 +249,10 @@ def main():
     cookie = login_with_env()
     try:
         token = extract_token_from_cookie(cookie)
+        print(f"[✓] 已解析出 token: {token[:12]}...")
     except ValueError as e:
         print(f"[✗] cookie 解析失败: {e}")
         sys.exit(1)
-    print(f"[✓] 登录成功,已解析出 token: {token[:12]}...")
 
     if args.cmd == "list":
         start = args.date or time.strftime("%Y-%m-%d")

@@ -26,6 +26,8 @@ uv run python booking.py book --topic 周会 --date 2026-09-23 --time 14:00
 uv run python booking.py delete 65464,65473
 ```
 
+登录态缓存于当前目录 `cookie.txt`(已 gitignore):首次运行后直接复用,失效自动重新登录。
+
 ## 开发
 
 ```bash
