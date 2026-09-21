@@ -26,8 +26,6 @@ uv run python booking.py book --topic 周会 --date 2026-09-23 --time 14:00
 uv run python booking.py delete 65464,65473
 ```
 
-会议预约后需管理员审批。
-
 ## 开发
 
 ```bash
