@@ -1,0 +1,17 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# 敏感信息(含账号密码/登录态,严禁提交)
+.env
+.env.*
+!.env.example
+user_info.txt
+*.cookie

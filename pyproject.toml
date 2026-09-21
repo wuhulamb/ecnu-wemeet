@@ -1,0 +1,23 @@
+[project]
+name = "ecnu-wemeet"
+version = "0.1.0"
+description = "华东师大云视频会议系统自动登录与预约"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "cryptography>=50.0.1",
+    "python-dotenv>=1.2.0",
+    "requests>=2.34.2",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.16",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "DTZ", "RUF", "EXE"]
