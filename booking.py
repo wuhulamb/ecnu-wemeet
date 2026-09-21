@@ -236,9 +236,15 @@ def main():
     )
 
     p_book = sub.add_parser("book", help="预约会议")
-    p_book.add_argument("--topic", required=True, help="会议主题")
     p_book.add_argument("--date", required=True, help="会议日期 YYYY-MM-DD")
-    p_book.add_argument("--time", required=True, help="开始时间 HH:MM")
+    p_book.add_argument(
+        "--topic",
+        help="会议主题,支持 {YYYY-MM-DD} 占位符(缺省取 .env VMR_MEETING_TOPIC)",
+    )
+    p_book.add_argument(
+        "--time",
+        help="开始时间 HH:MM(缺省取 .env VMR_MEETING_TIME)",
+    )
     p_book.add_argument("--duration", type=int, default=120, help="时长(分钟,默认120)")
     p_book.add_argument("--password", default="", help="会议密码(不传=无密码)")
 
@@ -284,12 +290,22 @@ def main():
         return
 
     # book
+    topic = args.topic or os.environ.get("VMR_MEETING_TOPIC", "")
+    time_slot = args.time or os.environ.get("VMR_MEETING_TIME", "")
+    if not topic or not time_slot:
+        parser.error("需要 --topic/--time,或 .env 配置 VMR_MEETING_TOPIC / VMR_MEETING_TIME")
+    topic = topic.replace("{YYYY-MM-DD}", args.date).replace("{date}", args.date)
     print(
-        f"[*] 正在预约: {args.topic} @ {args.date} {args.time} 时长{args.duration}分钟"
+        f"[*] 正在预约: {topic} @ {args.date} {time_slot} 时长{args.duration}分钟"
         f" 密码={'无' if not args.password else args.password}"
     )
     result = book_meeting(
-        cookie, args.topic, args.date, args.time, duration=args.duration, password=args.password
+        cookie,
+        topic,
+        args.date,
+        time_slot,
+        duration=args.duration,
+        password=args.password,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
 

@@ -19,8 +19,8 @@ cp .env.example .env   # 填入 VMR_USERNAME(学号) / VMR_PASSWORD(密码)
 # 查看会议(今天起 7 天,--days 可改,支持任意范围)
 uv run python booking.py list
 
-# 预约会议(默认时长 120 分钟;--password 设置密码,--duration 改时长)
-uv run python booking.py book --topic 周会 --date 2026-09-23 --time 14:00
+# 预约会议(主题/时间取 .env 配置;--topic/--time/--password/--duration 可覆盖)
+uv run python booking.py book --date 2026-09-24
 
 # 删除会议(多个用逗号分隔;已完成会议不可删)
 uv run python booking.py delete 65464,65473
